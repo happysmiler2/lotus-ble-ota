@@ -1,6 +1,122 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lotus BLE Safe Diagnostic</title><style>body{font:16px system-ui;background:#0d131c;color:#e6edf6;max-width:700px;margin:auto;padding:20px}button{padding:12px;margin:6px;background:#20364e;color:white;border:1px solid #537293;border-radius:8px}pre{white-space:pre-wrap;word-break:break-word;background:#080d14;padding:12px;border-radius:9px}p{color:#b7c4d4}</style></head><body><h1>Lotus BLE · Safe Write Diagnostic</h1><p>BENCH ONLY. No BEGIN, no binary data, no flash, no ABORT. Tests INFO on the control characteristic only. Does not prove DATA writes work.</p><button id="connect">Connect OBD2-CAN</button><button id="test" disabled>Test INFO write methods</button><button id="disconnect" disabled>Disconnect</button><pre id="log"></pre><script>
-const S='6e400001-b5a3-f393-e0a9-e50e24dcca9e',C='6e400008-b5a3-f393-e0a9-e50e24dcca9e',D='6e400009-b5a3-f393-e0a9-e50e24dcca9e',R='6e40000a-b5a3-f393-e0a9-e50e24dcca9e';let dev,ctrl,data,reply,connected=false,busy=false;const e=id=>document.getElementById(id),enc=new TextEncoder(),dec=new TextDecoder();function log(s){e('log').textContent+=new Date().toLocaleTimeString()+' '+s+'\n'}function err(x){return String(x?.name||'Error')+': '+String(x?.message??x)+' | '+Object.prototype.toString.call(x)}function ui(){e('connect').disabled=connected||busy;e('test').disabled=!connected||busy;e('disconnect').disabled=!connected||busy}function props(c){let p=c.properties;return 'read='+p.read+' write='+p.write+' writeWithoutResponse='+p.writeWithoutResponse+' notify='+p.notify}function gone(){connected=false;ctrl=data=reply=null;log('Disconnected');ui()}
-e('connect').onclick=async()=>{try{dev=await navigator.bluetooth.requestDevice({filters:[{name:'OBD2-CAN'}],optionalServices:[S]});dev.addEventListener('gattserverdisconnected',gone);let server=await dev.gatt.connect(),svc=await server.getPrimaryService(S);ctrl=await svc.getCharacteristic(C);data=await svc.getCharacteristic(D);reply=await svc.getCharacteristic(R);await reply.startNotifications();reply.addEventListener('characteristicvaluechanged',x=>log('RED: '+dec.decode(x.target.value)));connected=true;log('CTRL properties: '+props(ctrl));log('DATA properties: '+props(data));log('REPLY properties: '+props(reply));ui()}catch(x){log('CONNECT ERROR '+err(x));if(dev?.gatt?.connected)dev.gatt.disconnect();gone()}};
-e('disconnect').onclick=()=>dev?.gatt?.disconnect();
-e('test').onclick=async()=>{busy=true;ui();const bytes=enc.encode('INFO');const methods=['writeValueWithResponse','writeValue','writeValueWithoutResponse'];for(let m of methods){if(!connected)break;if(typeof ctrl[m]!=='function'){log(m+': not implemented');continue}try{log(m+': sending harmless INFO on CTRL');await ctrl[m](bytes);log(m+': resolved (watch for RED status)')}catch(x){log(m+': FAILED '+err(x))}await new Promise(r=>setTimeout(r,1200))}busy=false;ui();log('Finished. No firmware bytes sent.')};ui();
-</script></body></html>
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lotus BLE DATA Diagnostic</title>
+<style>
+body {
+  background:#0d131c;
+  color:#e6edf6;
+  font:16px -apple-system,Arial,sans-serif;
+  padding:20px;
+}
+button {
+  background:#20364e;
+  color:white;
+  border:1px solid #537293;
+  border-radius:9px;
+  padding:14px;
+  margin:5px;
+}
+pre {
+  background:#080d14;
+  padding:15px;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+}
+</style>
+</head>
+<body>
+<h2>Lotus BLE DATA Diagnostic</h2>
+<p>BENCH ONLY — read-only inspection.
+No firmware writes.</p>
+
+<button onclick="connect()">Connect RED</button>
+<button onclick="inspect()">Inspect DATA</button>
+<button onclick="disconnect()">Disconnect</button>
+
+<h3>Activity</h3>
+<pre id="log"></pre>
+
+<script>
+const SERVICE =
+'6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const DATA =
+'6e400009-b5a3-f393-e0a9-e50e24dcca9e';
+
+let device, server, data;
+
+function log(s) {
+ document.getElementById('log').textContent +=
+ new Date().toLocaleTimeString() + ' ' + s + '\n';
+}
+
+function errorText(e) {
+ try {
+  return JSON.stringify({
+   name:e?.name,
+   message:e?.message,
+   code:e?.code,
+   string:String(e)
+  });
+ } catch {
+  return String(e);
+ }
+}
+
+async function connect() {
+ try {
+  device = await navigator.bluetooth.requestDevice({
+   filters:[{name:'OBD2-CAN'}],
+   optionalServices:[SERVICE]
+  });
+
+  server = await device.gatt.connect();
+  const service =
+   await server.getPrimaryService(SERVICE);
+
+  data = await service.getCharacteristic(DATA);
+  log('CONNECTED TO RED');
+  inspect();
+ } catch(e) {
+  log('ERROR: ' + errorText(e));
+ }
+}
+
+function inspect() {
+ if(!data) {
+  log('Connect first');
+  return;
+ }
+
+ const p = data.properties;
+ log('DATA UUID: ' + data.uuid);
+ log('write: ' + p.write);
+ log('writeWithoutResponse: ' +
+     p.writeWithoutResponse);
+ log('read: ' + p.read);
+ log('notify: ' + p.notify);
+
+ for(const method of [
+  'writeValueWithResponse',
+  'writeValue',
+  'writeValueWithoutResponse'
+ ]) {
+  log(method + ': ' + typeof data[method]);
+ }
+
+ log('Inspection complete.');
+ log('No binary data transmitted.');
+}
+
+function disconnect() {
+ if(device?.gatt?.connected)
+  device.gatt.disconnect();
+ data = null;
+ log('DISCONNECTED');
+}
+</script>
+</body>
+</html>
