@@ -1,198 +1,164 @@
 
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport"
-      content="width=device-width, initial-scale=1">
-<title>Lotus BLE DATA Write Test</title>
-
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lotus OTA First Packet Test</title>
 <style>
-body {
-  background: #101820;
-  color: #e9f0f7;
-  font-family: -apple-system, Arial, sans-serif;
-  padding: 18px;
-}
-h2 { color: #80c9ff; }
-button {
-  background: #244665;
-  color: white;
-  border: 1px solid #658aaa;
-  border-radius: 8px;
-  padding: 14px;
-  margin: 5px 4px;
-  font-size: 15px;
-}
-button:disabled { opacity: .4; }
-pre {
-  background: #070d13;
-  padding: 14px;
-  border-radius: 8px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-size: 13px;
-}
+body{background:#101820;color:#e9f0f7;
+font:16px -apple-system,Arial,sans-serif;padding:18px}
+button{background:#244665;color:white;border:1px solid #658aaa;
+border-radius:8px;padding:14px;margin:5px}
+button:disabled{opacity:.4}
+pre{background:#070d13;padding:14px;border-radius:8px;
+white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
 </style>
 </head>
-
 <body>
-<h2>Lotus BLE DATA Write Test</h2>
+<h2>Lotus OTA — First Packet Test</h2>
+<p>RED: Diagnostic_Tester_ESP32C3.ino<br>
+V1.56-ROAD · BENCH ONLY</p>
+<p>Sends only 20 firmware bytes, then ABORT.
+Never sends END.</p>
 
-<p>
-RED: Diagnostic_Tester_ESP32C3.ino<br>
-Firmware: V1.56-ROAD<br>
-Test: 4-byte DATA write, no OTA BEGIN
-</p>
-
-<button onclick="connectRED()">
-  1. Connect RED
-</button>
-
-<button id="testBtn"
-        onclick="testDATA()"
-        disabled>
-  2. Test DATA Write
-</button>
-
-<button onclick="disconnectRED()">
-  Disconnect
-</button>
-
+<button id="connect" onclick="connectRED()">1. Connect RED</button>
+<p><input id="file" type="file" accept=".bin"
+onchange="checkReady()"> 2. Select application .bin</p>
+<label><input type="checkbox" id="confirm"
+onchange="checkReady()">
+RED is on the bench, engine off, GPIO1 grounded,
+BLUE simulating zero speed/RPM.</label>
+<p><button id="test" disabled onclick="runTest()">
+3. Test First Packet
+</button></p>
+<button onclick="abortOTA()">ABORT OTA</button>
 <h3>Activity Log</h3>
 <pre id="log">Ready.</pre>
 
 <script>
-const SERVICE =
-  "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const SERVICE="6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const CTRL="6e400008-b5a3-f393-e0a9-e50e24dcca9e";
+const DATA="6e400009-b5a3-f393-e0a9-e50e24dcca9e";
+const REPLY="6e40000a-b5a3-f393-e0a9-e50e24dcca9e";
 
-const CTRL =
-  "6e400008-b5a3-f393-e0a9-e50e24dcca9e";
+let device,ctrl,data,reply;
+let status="",busy=false;
+const enc=new TextEncoder();
+const dec=new TextDecoder();
 
-const DATA =
-  "6e400009-b5a3-f393-e0a9-e50e24dcca9e";
-
-const REPLY =
-  "6e40000a-b5a3-f393-e0a9-e50e24dcca9e";
-
-let device = null;
-let ctrl = null;
-let data = null;
-let reply = null;
-
-function log(message) {
-  const el = document.getElementById("log");
-  el.textContent +=
-    "\n" +
-    new Date().toLocaleTimeString() +
-    " " + message;
+function log(s){
+document.getElementById("log").textContent +=
+"\n"+new Date().toLocaleTimeString()+" "+s;
 }
-
-function describeError(e) {
-  try {
-    return JSON.stringify({
-      name: e?.name,
-      message: e?.message,
-      code: e?.code,
-      text: String(e)
-    });
-  } catch (_) {
-    return String(e);
-  }
+function err(e){
+return JSON.stringify({
+name:e?.name,message:e?.message,
+code:e?.code,text:String(e)
+});
 }
-
-async function connectRED() {
-  try {
-    log("Requesting OBD2-CAN...");
-
-    device = await navigator.bluetooth.requestDevice({
-      filters: [{ name: "OBD2-CAN" }],
-      optionalServices: [SERVICE]
-    });
-
-    device.addEventListener(
-      "gattserverdisconnected",
-      () => {
-        log("RED disconnected");
-        document.getElementById("testBtn")
-          .disabled = true;
-      }
-    );
-
-    const server = await device.gatt.connect();
-    const service =
-      await server.getPrimaryService(SERVICE);
-
-    ctrl = await service.getCharacteristic(CTRL);
-    data = await service.getCharacteristic(DATA);
-    reply = await service.getCharacteristic(REPLY);
-
-    await reply.startNotifications();
-
-    reply.addEventListener(
-      "characteristicvaluechanged",
-      event => {
-        const value = event.target.value;
-        const text = new TextDecoder().decode(value);
-        log("RED: " + text);
-      }
-    );
-
-    log("Connected to RED");
-    log("DATA write property: " +
-        data.properties.write);
-
-    const info = new TextEncoder().encode("INFO");
-    await ctrl.writeValueWithResponse(info);
-
-    document.getElementById("testBtn")
-      .disabled = false;
-
-    log("Ready for DATA test.");
-
-  } catch (e) {
-    log("CONNECT ERROR: " + describeError(e));
-  }
+function checkReady(){
+document.getElementById("test").disabled=
+busy || !device?.gatt?.connected ||
+!document.getElementById("file").files.length ||
+!document.getElementById("confirm").checked;
 }
-
-async function testDATA() {
-  const button = document.getElementById("testBtn");
-  button.disabled = true;
-
-  try {
-    if (!device?.gatt?.connected || !data) {
-      throw new Error("RED is not connected");
-    }
-
-    // Firmware ignores DATA outside an OTA session.
-    // Do NOT send BEGIN.
-    const packet = new Uint8Array([
-      0x11, 0x22, 0x33, 0x44
-    ]);
-
-    log("Sending DATA: 11 22 33 44");
-    log("Method: writeValueWithResponse");
-
-    await data.writeValueWithResponse(packet);
-
-    log("PASS: DATA write resolved.");
-    log("No OTA session started.");
-
-  } catch (e) {
-    log("FAIL: " + describeError(e));
-  } finally {
-    button.disabled = false;
-  }
+async function command(s){
+log("CTRL > "+s);
+await ctrl.writeValueWithResponse(enc.encode(s));
 }
+async function connectRED(){
+try{
+device=await navigator.bluetooth.requestDevice({
+filters:[{name:"OBD2-CAN"}],
+optionalServices:[SERVICE]
+});
+device.addEventListener("gattserverdisconnected",()=>{
+log("Disconnected");checkReady();
+});
+const server=await device.gatt.connect();
+const service=await server.getPrimaryService(SERVICE);
+ctrl=await service.getCharacteristic(CTRL);
+data=await service.getCharacteristic(DATA);
+reply=await service.getCharacteristic(REPLY);
+await reply.startNotifications();
+reply.addEventListener("characteristicvaluechanged",e=>{
+status=dec.decode(e.target.value);
+log("RED: "+status);
+});
+log("Connected");
+await command("INFO");
+checkReady();
+}catch(e){log("CONNECT ERROR: "+err(e));}
+}
+function waitForStatus(prefix,timeout=4000){
+return new Promise((resolve,reject)=>{
+if(status.startsWith(prefix))return resolve(status);
+let finished=false;
+const listener=e=>{
+const s=dec.decode(e.target.value);
+if(s.startsWith(prefix)||s.startsWith("OTA,ERR")){
+finished=true;
+reply.removeEventListener("characteristicvaluechanged",listener);
+resolve(s);
+}
+};
+reply.addEventListener("characteristicvaluechanged",listener);
+setTimeout(()=>{
+if(!finished){
+reply.removeEventListener("characteristicvaluechanged",listener);
+reject(new Error("Timeout waiting for "+prefix));
+}
+},timeout);
+});
+}
+async function abortOTA(){
+try{
+if(ctrl && device?.gatt?.connected){
+await command("ABORT");
+log("ABORT command sent");
+}
+}catch(e){log("ABORT ERROR: "+err(e));}
+}
+async function runTest(){
+if(busy)return;
+busy=true;checkReady();
+let began=false;
+try{
+const file=document.getElementById("file").files[0];
+const bytes=new Uint8Array(await file.arrayBuffer());
+if(bytes.length<4096||bytes[0]!==0xE9)
+throw new Error("Invalid ESP32 application binary");
+if(!data.properties.write)
+throw new Error("DATA lacks write-with-response property");
+log("File: "+file.name+" ("+bytes.length+" bytes)");
+status="";
+await command("INFO");
+const armed=await waitForStatus("OTA,ARMED");
+if(armed!=="OTA,ARMED")
+throw new Error("RED not armed: "+armed);
 
-      
-function disconnectRED() {
-  if (device?.gatt?.connected) {
-    device.gatt.disconnect();
-  }
-  document.getElementById("testBtn")
-    .disabled = true;
-  log("Disconnected.");
+status="";
+await command("BEGIN,"+bytes.length);
+const ready=await waitForStatus("OTA,READY");
+if(ready!=="OTA,READY")
+throw new Error("BEGIN rejected: "+ready);
+began=true;
+
+const first=bytes.slice(0,20);
+log("Sending first 20 bytes: "+
+Array.from(first).map(x=>x.toString(16).padStart(2,"0")).join(" "));
+await data.writeValueWithResponse(first);
+log("PASS: First DATA packet write resolved");
+log("This does not yet confirm flash success");
+}catch(e){
+log("TEST ERROR: "+err(e));
+}finally{
+if(began)log("Stopping after first packet");
+await abortOTA();
+busy=false;checkReady();
+log("TEST FINISHED — no END sent");
+}
 }
 </script>
 </body>
