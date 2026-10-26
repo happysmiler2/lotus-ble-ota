@@ -4,7 +4,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Lotus OTA 16 KB Test</title>
+<title>Lotus OTA Packet Size Test</title>
 <style>
 body {
   background:#101820;
@@ -12,13 +12,15 @@ body {
   font:16px -apple-system,Arial,sans-serif;
   padding:18px;
 }
-button {
+h2 {color:#80c9ff}
+button,select {
   background:#244665;
   color:white;
   border:1px solid #658aaa;
   border-radius:8px;
   padding:13px;
   margin:5px;
+  font-size:16px;
 }
 button:disabled {opacity:.4}
 pre {
@@ -29,64 +31,68 @@ pre {
   overflow-wrap:anywhere;
   font-size:13px;
 }
+progress {width:100%;height:22px}
 </style>
 </head>
 <body>
 
-<h2>Lotus OTA — 16 KB Test</h2>
+<h2>Lotus OTA — Packet Size Test</h2>
 <p>
-RED: Diagnostic_Tester_ESP32C3.ino · V1.56-ROAD<br>
-BENCH ONLY. Sends 16,384 bytes then ABORT. Never END.
+RED: Diagnostic_Tester_ESP32C3.ino<br>
+Firmware V1.56-ROAD<br>
+BENCH ONLY — 16 KB transfer followed by ABORT.
 </p>
 
-<button id="connect" onclick="connectRED()">
-1. Connect RED
-</button>
+<button onclick="connectRED()">1. Connect RED</button>
 
-<p>
-2. Select application .bin:
+<p>2. Select application firmware:</p>
 <input id="file" type="file" accept=".bin"
        onchange="ready()">
-</p>
+
+<p>3. BLE packet size:</p>
+<select id="size">
+<option value="20">20 bytes (baseline)</option>
+<option value="64" selected>64 bytes</option>
+<option value="128">128 bytes</option>
+</select>
 
 <p>
 <label>
 <input id="confirm" type="checkbox" onchange="ready()">
-RED is on bench, GPIO1 grounded before boot;
+RED is on bench, GPIO1 grounded before boot,
 BLUE simulates zero RPM and speed.
 </label>
 </p>
 
 <button id="test" disabled onclick="runTest()">
-3. Test 16 KB
+4. Start 16 KB Test
 </button>
+<button onclick="abortOTA()">ABORT</button>
 
-<button id="abort" onclick="abortOTA()">ABORT</button>
+<h3>Transfer progress</h3>
+<progress id="progress" value="0" max="16384"></progress>
+<div id="counter">0 / 16384 bytes</div>
 
 <h3>Activity Log</h3>
 <pre id="log">Ready.</pre>
 
 <script>
-const SERVICE =
-'6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-const CTRL =
-'6e400008-b5a3-f393-e0a9-e50e24dcca9e';
-const DATA =
-'6e400009-b5a3-f393-e0a9-e50e24dcca9e';
-const REPLY =
-'6e40000a-b5a3-f393-e0a9-e50e24dcca9e';
+const SERVICE="6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const CTRL="6e400008-b5a3-f393-e0a9-e50e24dcca9e";
+const DATA="6e400009-b5a3-f393-e0a9-e50e24dcca9e";
+const REPLY="6e40000a-b5a3-f393-e0a9-e50e24dcca9e";
 
-const enc = new TextEncoder();
-const dec = new TextDecoder();
+const enc=new TextEncoder();
+const dec=new TextDecoder();
+const TARGET=16384;
 
-let device, ctrl, data, reply;
-let busy = false;
-let stop = false;
-const received = [];
+let device,ctrl,data,reply;
+let busy=false,stop=false,uploadActive=false;
+let received=[];
 
 function log(s) {
-  document.getElementById('log').textContent +=
-    '\n' + new Date().toLocaleTimeString() + ' ' + s;
+  document.getElementById("log").textContent +=
+    "\n"+new Date().toLocaleTimeString()+" "+s;
 }
 
 function error(e) {
@@ -99,198 +105,172 @@ function error(e) {
 }
 
 function ready() {
-  document.getElementById('test').disabled =
+  document.getElementById("test").disabled =
     busy ||
     !device?.gatt?.connected ||
-    !document.getElementById('file').files.length ||
-    !document.getElementById('confirm').checked;
+    !document.getElementById("file").files.length ||
+    !document.getElementById("confirm").checked;
 }
 
 async function cmd(s) {
-  log('CTRL > ' + s);
+  log("CTRL > "+s);
   await ctrl.writeValueWithResponse(enc.encode(s));
 }
 
 async function connectRED() {
   try {
-    device = await navigator.bluetooth.requestDevice({
-      filters:[{name:'OBD2-CAN'}],
+    device=await navigator.bluetooth.requestDevice({
+      filters:[{name:"OBD2-CAN"}],
       optionalServices:[SERVICE]
     });
 
-    device.addEventListener(
-      'gattserverdisconnected',
-      () => {
-        log('RED disconnected');
-        stop = true;
-        ready();
-      }
-    );
+    device.addEventListener("gattserverdisconnected",()=>{
+      log("RED disconnected");
+      stop=true;
+      ready();
+    });
 
-    const server = await device.gatt.connect();
-    const service =
-      await server.getPrimaryService(SERVICE);
+    const server=await device.gatt.connect();
+    const service=await server.getPrimaryService(SERVICE);
 
-    ctrl = await service.getCharacteristic(CTRL);
-    data = await service.getCharacteristic(DATA);
-    reply = await service.getCharacteristic(REPLY);
+    ctrl=await service.getCharacteristic(CTRL);
+    data=await service.getCharacteristic(DATA);
+    reply=await service.getCharacteristic(REPLY);
 
     await reply.startNotifications();
 
     reply.addEventListener(
-      'characteristicvaluechanged',
-      e => {
-        const s = dec.decode(e.target.value);
+      "characteristicvaluechanged",e=>{
+        const s=dec.decode(e.target.value);
         received.push(s);
-        log('RED: ' + s);
+        log("RED: "+s);
+        if(s.startsWith("OTA,ERR"))stop=true;
       }
     );
 
-    log('Connected');
-    await cmd('INFO');
+    log("Connected");
+    await cmd("INFO");
     ready();
 
   } catch(e) {
-    log('CONNECT ERROR: ' + error(e));
+    log("CONNECT ERROR: "+error(e));
   }
 }
 
-async function waitFor(prefix, after, timeout=5000) {
-  const until = Date.now() + timeout;
-
-  while(Date.now() < until) {
-    const hit = received.slice(after).find(
-      s => s.startsWith(prefix) ||
-           s.startsWith('OTA,ERR')
+async function waitFor(prefix,after,timeout=5000) {
+  const until=Date.now()+timeout;
+  while(Date.now()<until) {
+    const hit=received.slice(after).find(
+      s=>s.startsWith(prefix)||
+         s.startsWith("OTA,ERR")
     );
-
-    if(hit) return hit;
-
-    await new Promise(r => setTimeout(r,40));
+    if(hit)return hit;
+    await new Promise(r=>setTimeout(r,40));
   }
-
-  throw new Error('Timeout waiting for ' + prefix);
+  throw new Error("Timeout waiting for "+prefix);
 }
 
 async function abortOTA() {
-  stop = true;
-
+  stop=true;
   try {
-    if(ctrl && device?.gatt?.connected) {
-      await cmd('ABORT');
-      log('ABORT command sent');
+    if(ctrl&&device?.gatt?.connected) {
+      await cmd("ABORT");
+      log("ABORT command sent");
     }
   } catch(e) {
-    log('ABORT ERROR: ' + error(e));
+    log("ABORT ERROR: "+error(e));
   }
 }
 
 async function runTest() {
-  if(busy) return;
-
-  busy = true;
-  stop = false;
+  if(busy)return;
+  busy=true;
+  stop=false;
   ready();
 
-  let began = false;
+  let sent=0;
+  const started=Date.now();
+  const packetSize=Number(
+    document.getElementById("size").value
+  );
+
+  document.getElementById("progress").value=0;
+  document.getElementById("counter").textContent=
+    "0 / "+TARGET+" bytes";
 
   try {
-    const f = document.getElementById('file').files[0];
-    const bytes = new Uint8Array(await f.arrayBuffer());
+    const file=document.getElementById("file").files[0];
+    const bytes=new Uint8Array(await file.arrayBuffer());
 
-    if(bytes.length < 16384 || bytes[0] !== 0xe9)
-      throw new Error(
-        'Select valid ESP32 application .bin >= 16 KB'
-      );
+    if(bytes.length<TARGET||bytes[0]!==0xe9)
+      throw new Error("Invalid application binary");
 
     if(!data.properties.write)
-      throw new Error(
-        'DATA write property not available'
-      );
+      throw new Error("DATA does not support write");
 
-    log('File: ' + f.name +
-        ' (' + bytes.length + ' bytes)');
+    log("Testing "+packetSize+"-byte packets");
+    log("Firmware: "+file.name+
+        " ("+bytes.length+" bytes)");
 
-    let index = received.length;
-    await cmd('INFO');
+    let index=received.length;
+    await cmd("INFO");
+    let s=await waitFor("OTA,ARMED",index);
+    if(s!=="OTA,ARMED")
+      throw new Error("Not armed: "+s);
 
-    let s = await waitFor('OTA,ARMED', index);
+    index=received.length;
+    await cmd("BEGIN,"+bytes.length);
+    s=await waitFor("OTA,READY",index);
+    if(s!=="OTA,READY")
+      throw new Error("BEGIN failed: "+s);
 
-    if(s !== 'OTA,ARMED')
-      throw new Error('Not armed: ' + s);
+    uploadActive=true;
+    const progressStart=received.length;
 
-    index = received.length;
-    await cmd('BEGIN,' + bytes.length);
-
-    s = await waitFor('OTA,READY', index);
-
-    if(s !== 'OTA,READY')
-      throw new Error('BEGIN failed: ' + s);
-
-    began = true;
-
-    const target = 16384;
-    const chunkSize = 20;
-    let sent = 0;
-
-    while(sent < target && !stop) {
-      const part = bytes.slice(
-        sent,
-        Math.min(sent + chunkSize, target)
+    while(sent<TARGET&&!stop) {
+      const part=bytes.slice(
+        sent,Math.min(sent+packetSize,TARGET)
       );
 
       await data.writeValueWithResponse(part);
-      sent += part.length;
+      sent+=part.length;
 
-      if(sent % 2048 === 0 || sent === target)
-        log(
-          'BLE writes resolved: ' +
-          sent + '/' + target + ' bytes'
-        );
+      document.getElementById("progress").value=sent;
+      document.getElementById("counter").textContent=
+        sent+" / "+TARGET+" bytes";
+
+      if(sent%2048<packetSize||sent===TARGET)
+        log("BLE writes resolved: "+sent+"/"+TARGET);
     }
 
     if(stop) {
-      log(
-        'Stopped by user or disconnect at ' +
-        sent + ' bytes'
-      );
+      log("Transfer stopped at "+sent+" bytes");
     } else {
-      log(
-        '16 KB BLE writes completed. ' +
-        'Waiting briefly for RED progress notification...'
-      );
+      log("All 16 KB BLE writes resolved");
+      await new Promise(r=>setTimeout(r,700));
 
-      await new Promise(
-        r => setTimeout(r,600)
-      );
+      const progress=received.slice(progressStart)
+        .filter(s=>s.startsWith("OTA,PROGRESS"))
+        .slice(-1)[0];
 
-      const progress = received.findLast
-        ? received.findLast(
-            x => x.startsWith('OTA,PROGRESS')
-          )
-        : received.filter(
-            x => x.startsWith('OTA,PROGRESS')
-          ).slice(-1)[0];
-
-      log(
-        progress
-          ? 'Last progress: ' + progress
-          : 'No OTA,PROGRESS observed — check RED USB serial output'
-      );
+      log(progress
+        ? "ESP32 confirmation: "+progress
+        : "No ESP32 progress notification received");
     }
 
   } catch(e) {
-    log('TEST ERROR: ' + error(e));
+    log("TEST ERROR: "+error(e));
   } finally {
-    if(began)
-      log('Aborting incomplete transfer');
+    const seconds=(Date.now()-started)/1000;
+    log("Elapsed: "+seconds.toFixed(1)+" seconds");
+    log("Bytes written through BLE: "+sent);
 
     await abortOTA();
-
-    busy = false;
+    uploadActive=false;
+    busy=false;
     ready();
 
-    log('TEST FINISHED — END was not sent');
+    log("TEST FINISHED — END never sent");
   }
 }
 </script>
